@@ -576,6 +576,32 @@ func appendMediaPaths(attachments []string, mediaPaths any, label string) []stri
 	return attachments
 }
 
+// normalizeButtonsForChatwoot converts the "buttons" payload field into the
+// []map[string]any shape the Chatwoot API JSON body needs. Same []T vs []any
+// duality as appendMediaPaths: []interactiveButton on the live path, []any
+// (each element already a map[string]any) after the Chatwoot forward retry
+// queue's JSON round-trip.
+func normalizeButtonsForChatwoot(raw any) []map[string]any {
+	switch v := raw.(type) {
+	case []interactiveButton:
+		out := make([]map[string]any, 0, len(v))
+		for _, b := range v {
+			out = append(out, map[string]any{"type": b.Type, "label": b.Label, "value": b.Value})
+		}
+		return out
+	case []any:
+		out := make([]map[string]any, 0, len(v))
+		for _, item := range v {
+			if m, ok := item.(map[string]any); ok {
+				out = append(out, m)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
 func shouldForwardEventToChatwoot(eventName string) bool {
 	switch eventName {
 	case "message", "message.reaction":
@@ -977,6 +1003,124 @@ func formatNativeFlowButton(button *waE2E.InteractiveMessage_NativeFlowMessage_N
 		return fmt.Sprintf("[%s] %s", name, label)
 	}
 	return fmt.Sprintf("[%s]", name)
+}
+
+// interactiveButton is the structured shape sent to Chatwoot via
+// content_attributes.data.buttons, letting the dashboard render real
+// clickable/visual buttons instead of parsing them back out of the
+// "interactive"/"template" text summary. Mirrors the frontend's expected
+// shape in app/javascript/dashboard/components-next/message/bubbles/Base.vue.
+// Value is the URL/phone/copy-code for url/call/copy buttons and empty for
+// reply, since a quick-reply payload isn't actionable from Chatwoot anyway.
+type interactiveButton struct {
+	Type  string `json:"type"`
+	Label string `json:"label"`
+	Value string `json:"value,omitempty"`
+}
+
+// extractNativeFlowButtons mirrors formatNativeFlowButton's per-type
+// handling, but returns structured entries instead of a text line, and only
+// for the types Chatwoot can meaningfully render (url/call/copy: a real
+// action; quick_reply/single_select: a display-only label). Buttons missing
+// their required field (e.g. cta_url with no url) are skipped rather than
+// emitted with an empty value the frontend would render as a dead link.
+func extractNativeFlowButtons(im *waE2E.InteractiveMessage) []interactiveButton {
+	var buttons []interactiveButton
+	for _, button := range im.GetNativeFlowMessage().GetButtons() {
+		var params nativeFlowButtonParams
+		_ = json.Unmarshal([]byte(button.GetButtonParamsJSON()), &params)
+
+		switch button.GetName() {
+		case "cta_url":
+			if params.URL == "" {
+				continue
+			}
+			label := params.DisplayText
+			if label == "" {
+				label = "Link"
+			}
+			buttons = append(buttons, interactiveButton{Type: "url", Label: label, Value: params.URL})
+		case "cta_call":
+			if params.PhoneNumber == "" {
+				continue
+			}
+			label := params.DisplayText
+			if label == "" {
+				label = "Call"
+			}
+			buttons = append(buttons, interactiveButton{Type: "call", Label: label, Value: params.PhoneNumber})
+		case "cta_copy":
+			if params.Copy == "" {
+				continue
+			}
+			label := params.DisplayText
+			if label == "" {
+				label = "Copy code"
+			}
+			buttons = append(buttons, interactiveButton{Type: "copy", Label: label, Value: params.Copy})
+		case "quick_reply", "single_select":
+			label := params.DisplayText
+			if label == "" {
+				label = params.Title
+			}
+			if label == "" {
+				continue
+			}
+			buttons = append(buttons, interactiveButton{Type: "reply", Label: label})
+		}
+	}
+	return buttons
+}
+
+// extractHydratedTemplateButtons mirrors formatHydratedTemplateButton with
+// the same structured-vs-text distinction as extractNativeFlowButtons.
+func extractHydratedTemplateButtons(hydrated *waE2E.TemplateMessage_HydratedFourRowTemplate) []interactiveButton {
+	var buttons []interactiveButton
+	for _, button := range hydrated.GetHydratedButtons() {
+		if quickReply := button.GetQuickReplyButton(); quickReply != nil {
+			if text := quickReply.GetDisplayText(); text != "" {
+				buttons = append(buttons, interactiveButton{Type: "reply", Label: text})
+			}
+			continue
+		}
+		if urlButton := button.GetUrlButton(); urlButton != nil {
+			if url := urlButton.GetURL(); url != "" {
+				label := urlButton.GetDisplayText()
+				if label == "" {
+					label = "Link"
+				}
+				buttons = append(buttons, interactiveButton{Type: "url", Label: label, Value: url})
+			}
+			continue
+		}
+		if callButton := button.GetCallButton(); callButton != nil {
+			if phone := callButton.GetPhoneNumber(); phone != "" {
+				label := callButton.GetDisplayText()
+				if label == "" {
+					label = "Call"
+				}
+				buttons = append(buttons, interactiveButton{Type: "call", Label: label, Value: phone})
+			}
+		}
+	}
+	return buttons
+}
+
+// extractTemplateMessageButtons picks the right extractor for whichever of
+// TemplateMessage's three formats is populated, mirroring
+// formatTemplateMessageSummary's own dispatch.
+func extractTemplateMessageButtons(tm *waE2E.TemplateMessage) []interactiveButton {
+	if tm == nil {
+		return nil
+	}
+	if im := tm.GetInteractiveMessageTemplate(); im != nil {
+		return extractNativeFlowButtons(im)
+	}
+	hydrated := tm.GetHydratedFourRowTemplate()
+	if hydrated == nil {
+		hydrated = tm.GetHydratedTemplate()
+	}
+	return extractHydratedTemplateButtons(hydrated)
 }
 
 func extractContactDetails(contact any) (name string, phone string, ok bool) {
@@ -1400,6 +1544,12 @@ func syncPayloadToChatwoot(ctx context.Context, payload map[string]any, eventNam
 		}
 		if rid, _ := data["replied_to_id"].(string); rid != "" {
 			msgOpts.ContentAttributes = map[string]any{"in_reply_to_external_id": "WAID:" + rid}
+		}
+		if buttons := normalizeButtonsForChatwoot(data["buttons"]); len(buttons) > 0 {
+			if msgOpts.ContentAttributes == nil {
+				msgOpts.ContentAttributes = map[string]any{}
+			}
+			msgOpts.ContentAttributes["data"] = map[string]any{"buttons": buttons}
 		}
 	}
 	info.IsFromMe = chatwootMessageTypeFromPayload(data) == "outgoing"

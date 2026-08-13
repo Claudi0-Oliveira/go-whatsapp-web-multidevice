@@ -629,6 +629,12 @@ func buildOtherMessageTypes(msg *waE2E.Message, payload map[string]any) {
 		// miss on retry and silently downgrade to the generic sentinel,
 		// losing the CTA label/URL/phone/code the live path just extracted.
 		payload["interactive"] = formatInteractiveMessageSummary(interactiveMessage)
+		if buttons := extractNativeFlowButtons(interactiveMessage); len(buttons) > 0 {
+			// Structured (not text-rendered) so Chatwoot can show real
+			// clickable/visual buttons instead of parsing them back out of
+			// the "interactive" text summary above.
+			payload["buttons"] = buttons
+		}
 	}
 
 	if templateMessage := msg.GetTemplateMessage(); templateMessage != nil {
@@ -641,6 +647,9 @@ func buildOtherMessageTypes(msg *waE2E.Message, payload map[string]any) {
 		// the raw proto, so it survives the JSON round-trip on the Chatwoot
 		// forward retry path.
 		payload["template"] = formatTemplateMessageSummary(templateMessage)
+		if buttons := extractTemplateMessageButtons(templateMessage); len(buttons) > 0 {
+			payload["buttons"] = buttons
+		}
 	}
 }
 

@@ -2,6 +2,7 @@ package whatsapp
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1409,6 +1410,137 @@ func TestExtractStructuredMessageContentTemplate(t *testing.T) {
 		got := extractStructuredMessageContent(map[string]any{"template": ""})
 		if got != "" {
 			t.Fatalf("got %q", got)
+		}
+	})
+}
+
+func TestExtractNativeFlowButtons(t *testing.T) {
+	t.Run("cta_url, cta_call, cta_copy, and quick_reply", func(t *testing.T) {
+		im := &waE2E.InteractiveMessage{
+			InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
+				NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
+					Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+						{Name: proto.String("cta_url"), ButtonParamsJSON: proto.String(`{"display_text":"Visitar site","url":"https://example.com"}`)},
+						{Name: proto.String("cta_call"), ButtonParamsJSON: proto.String(`{"display_text":"Ligar","phone_number":"+5511999999999"}`)},
+						{Name: proto.String("cta_copy"), ButtonParamsJSON: proto.String(`{"display_text":"Copiar cupom","copy_code":"PROMO10"}`)},
+						{Name: proto.String("quick_reply"), ButtonParamsJSON: proto.String(`{"display_text":"Confirmar","id":"confirm"}`)},
+					},
+				},
+			},
+		}
+		want := []interactiveButton{
+			{Type: "url", Label: "Visitar site", Value: "https://example.com"},
+			{Type: "call", Label: "Ligar", Value: "+5511999999999"},
+			{Type: "copy", Label: "Copiar cupom", Value: "PROMO10"},
+			{Type: "reply", Label: "Confirmar"},
+		}
+		got := extractNativeFlowButtons(im)
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("got %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("cta_url with no url is skipped rather than emitted with an empty value", func(t *testing.T) {
+		im := &waE2E.InteractiveMessage{
+			InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
+				NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
+					Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+						{Name: proto.String("cta_url"), ButtonParamsJSON: proto.String(`{"display_text":"Visitar site"}`)},
+					},
+				},
+			},
+		}
+		if got := extractNativeFlowButtons(im); len(got) != 0 {
+			t.Fatalf("got %+v, want empty", got)
+		}
+	})
+
+	t.Run("unrecognized button name is skipped", func(t *testing.T) {
+		im := &waE2E.InteractiveMessage{
+			InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
+				NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
+					Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+						{Name: proto.String("review_and_pay"), ButtonParamsJSON: proto.String(`{}`)},
+					},
+				},
+			},
+		}
+		if got := extractNativeFlowButtons(im); len(got) != 0 {
+			t.Fatalf("got %+v, want empty", got)
+		}
+	})
+}
+
+func TestExtractHydratedTemplateButtons(t *testing.T) {
+	hydrated := &waE2E.TemplateMessage_HydratedFourRowTemplate{
+		HydratedButtons: []*waE2E.HydratedTemplateButton{
+			{HydratedButton: &waE2E.HydratedTemplateButton_QuickReplyButton{QuickReplyButton: &waE2E.HydratedTemplateButton_HydratedQuickReplyButton{DisplayText: proto.String("Rastrear pedido")}}},
+			{HydratedButton: &waE2E.HydratedTemplateButton_UrlButton{UrlButton: &waE2E.HydratedTemplateButton_HydratedURLButton{DisplayText: proto.String("Ver detalhes"), URL: proto.String("https://example.com/order/123")}}},
+			{HydratedButton: &waE2E.HydratedTemplateButton_CallButton{CallButton: &waE2E.HydratedTemplateButton_HydratedCallButton{DisplayText: proto.String("Ligar"), PhoneNumber: proto.String("+5511999999999")}}},
+		},
+	}
+	want := []interactiveButton{
+		{Type: "reply", Label: "Rastrear pedido"},
+		{Type: "url", Label: "Ver detalhes", Value: "https://example.com/order/123"},
+		{Type: "call", Label: "Ligar", Value: "+5511999999999"},
+	}
+	got := extractHydratedTemplateButtons(hydrated)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestExtractTemplateMessageButtons(t *testing.T) {
+	t.Run("interactive message template delegates to native flow extraction", func(t *testing.T) {
+		tm := &waE2E.TemplateMessage{
+			Format: &waE2E.TemplateMessage_InteractiveMessageTemplate{
+				InteractiveMessageTemplate: &waE2E.InteractiveMessage{
+					InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
+						NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
+							Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+								{Name: proto.String("cta_url"), ButtonParamsJSON: proto.String(`{"display_text":"Visitar","url":"https://example.com"}`)},
+							},
+						},
+					},
+				},
+			},
+		}
+		want := []interactiveButton{{Type: "url", Label: "Visitar", Value: "https://example.com"}}
+		if got := extractTemplateMessageButtons(tm); !reflect.DeepEqual(got, want) {
+			t.Fatalf("got %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("nil message yields nil", func(t *testing.T) {
+		if got := extractTemplateMessageButtons(nil); got != nil {
+			t.Fatalf("got %+v, want nil", got)
+		}
+	})
+}
+
+func TestNormalizeButtonsForChatwoot(t *testing.T) {
+	t.Run("live path: []interactiveButton", func(t *testing.T) {
+		got := normalizeButtonsForChatwoot([]interactiveButton{{Type: "url", Label: "Visitar site", Value: "https://example.com"}})
+		want := []map[string]any{{"type": "url", "label": "Visitar site", "value": "https://example.com"}}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("got %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("retry path: []any after JSON round-trip", func(t *testing.T) {
+		got := normalizeButtonsForChatwoot([]any{map[string]any{"type": "reply", "label": "Confirmar"}})
+		want := []map[string]any{{"type": "reply", "label": "Confirmar"}}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("got %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("nil or unrecognized shape yields nil", func(t *testing.T) {
+		if got := normalizeButtonsForChatwoot(nil); got != nil {
+			t.Fatalf("got %+v, want nil", got)
+		}
+		if got := normalizeButtonsForChatwoot("garbage"); got != nil {
+			t.Fatalf("got %+v, want nil", got)
 		}
 	})
 }
