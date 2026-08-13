@@ -202,6 +202,7 @@ func payloadHasNoRenderableContent(payload map[string]any) bool {
 		"body",
 		"image", "audio", "video", "video_note", "document", "sticker",
 		"contact", "contacts_array", "list", "live_location", "location", "order",
+		"interactive", "template",
 	}
 	for _, key := range renderableKeys {
 		if _, ok := payload[key]; ok {
@@ -229,7 +230,9 @@ func hasRecognizedMessageType(msg *waE2E.Message) bool {
 		msg.GetListMessage() != nil,
 		msg.GetLiveLocationMessage() != nil,
 		msg.GetLocationMessage() != nil,
-		msg.GetOrderMessage() != nil:
+		msg.GetOrderMessage() != nil,
+		msg.GetInteractiveMessage() != nil,
+		msg.GetTemplateMessage() != nil:
 		return true
 	default:
 		return false
@@ -463,7 +466,60 @@ func buildMediaFields(ctx context.Context, client *whatsmeow.Client, msg *waE2E.
 		payload["interactive_media"] = mediaPaths
 	}
 
+	if mediaPaths := collectTemplateMedia(ctx, client, msg.GetTemplateMessage()); len(mediaPaths) > 0 {
+		// Same reasoning as interactive_media above: a plain []string survives
+		// the Chatwoot forward retry queue's JSON round-trip.
+		payload["template_media"] = mediaPaths
+	}
+
 	return nil
+}
+
+// collectTemplateMedia extracts the image/video/document carried by a
+// TemplateMessage's hydrated header, if any — templates only have one
+// header, unlike an InteractiveMessage carousel, so no recursion is needed.
+// Returns nil when WHATSAPP_AUTO_DOWNLOAD_MEDIA is disabled, same as
+// collectInteractiveMedia.
+func collectTemplateMedia(ctx context.Context, client *whatsmeow.Client, tm *waE2E.TemplateMessage) []string {
+	if tm == nil || !config.WhatsappAutoDownloadMedia {
+		return nil
+	}
+
+	if im := tm.GetInteractiveMessageTemplate(); im != nil {
+		return collectInteractiveMedia(ctx, client, im)
+	}
+
+	hydrated := tm.GetHydratedFourRowTemplate()
+	if hydrated == nil {
+		hydrated = tm.GetHydratedTemplate()
+	}
+	if hydrated == nil {
+		return nil
+	}
+
+	var paths []string
+	if imageMedia := hydrated.GetImageMessage(); imageMedia != nil {
+		if extracted, err := utils.ExtractMedia(ctx, client, config.PathMedia, imageMedia); err != nil {
+			logrus.Errorf("Failed to download template header image: %v", err)
+		} else {
+			paths = append(paths, extracted.MediaPath)
+		}
+	}
+	if videoMedia := hydrated.GetVideoMessage(); videoMedia != nil {
+		if extracted, err := utils.ExtractMedia(ctx, client, config.PathMedia, videoMedia); err != nil {
+			logrus.Errorf("Failed to download template header video: %v", err)
+		} else {
+			paths = append(paths, extracted.MediaPath)
+		}
+	}
+	if documentMedia := hydrated.GetDocumentMessage(); documentMedia != nil {
+		if extracted, err := utils.ExtractMedia(ctx, client, config.PathMedia, documentMedia); err != nil {
+			logrus.Errorf("Failed to download template header document: %v", err)
+		} else {
+			paths = append(paths, extracted.MediaPath)
+		}
+	}
+	return paths
 }
 
 // collectInteractiveMedia extracts every image/video/document reachable from
@@ -573,6 +629,18 @@ func buildOtherMessageTypes(msg *waE2E.Message, payload map[string]any) {
 		// miss on retry and silently downgrade to the generic sentinel,
 		// losing the CTA label/URL/phone/code the live path just extracted.
 		payload["interactive"] = formatInteractiveMessageSummary(interactiveMessage)
+	}
+
+	if templateMessage := msg.GetTemplateMessage(); templateMessage != nil {
+		// Official WhatsApp Business/Cloud API template notifications (the
+		// pre-approved messages businesses send to customers) arrive as this
+		// type instead of Conversation/ExtendedTextMessage, so like
+		// InteractiveMessage above they carried no body text and rendered as
+		// "(Unsupported message type)" in Chatwoot. Same retry-safety
+		// reasoning as "interactive": rendered to a string now, not stored as
+		// the raw proto, so it survives the JSON round-trip on the Chatwoot
+		// forward retry path.
+		payload["template"] = formatTemplateMessageSummary(templateMessage)
 	}
 }
 

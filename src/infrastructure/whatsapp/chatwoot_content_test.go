@@ -1278,3 +1278,137 @@ func TestExtractStructuredMessageContentInteractive(t *testing.T) {
 		}
 	})
 }
+
+func TestFormatTemplateMessageSummary(t *testing.T) {
+	t.Run("hydrated title, content, footer, and quick reply button", func(t *testing.T) {
+		tm := &waE2E.TemplateMessage{
+			HydratedTemplate: &waE2E.TemplateMessage_HydratedFourRowTemplate{
+				Title: &waE2E.TemplateMessage_HydratedFourRowTemplate_HydratedTitleText{
+					HydratedTitleText: "Pedido confirmado",
+				},
+				HydratedContentText: proto.String("Seu pedido #123 foi confirmado."),
+				HydratedFooterText:  proto.String("Equipe Suporte"),
+				HydratedButtons: []*waE2E.HydratedTemplateButton{
+					{
+						HydratedButton: &waE2E.HydratedTemplateButton_QuickReplyButton{
+							QuickReplyButton: &waE2E.HydratedTemplateButton_HydratedQuickReplyButton{
+								DisplayText: proto.String("Rastrear pedido"),
+							},
+						},
+					},
+				},
+			},
+		}
+		want := "Pedido confirmado\nSeu pedido #123 foi confirmado.\nEquipe Suporte\n[Rastrear pedido]"
+		if got := formatTemplateMessageSummary(tm); got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("url button", func(t *testing.T) {
+		tm := &waE2E.TemplateMessage{
+			HydratedTemplate: &waE2E.TemplateMessage_HydratedFourRowTemplate{
+				HydratedButtons: []*waE2E.HydratedTemplateButton{
+					{
+						HydratedButton: &waE2E.HydratedTemplateButton_UrlButton{
+							UrlButton: &waE2E.HydratedTemplateButton_HydratedURLButton{
+								DisplayText: proto.String("Ver detalhes"),
+								URL:         proto.String("https://example.com/order/123"),
+							},
+						},
+					},
+				},
+			},
+		}
+		want := "🔗 Ver detalhes: https://example.com/order/123"
+		if got := formatTemplateMessageSummary(tm); got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("call button", func(t *testing.T) {
+		tm := &waE2E.TemplateMessage{
+			HydratedTemplate: &waE2E.TemplateMessage_HydratedFourRowTemplate{
+				HydratedButtons: []*waE2E.HydratedTemplateButton{
+					{
+						HydratedButton: &waE2E.HydratedTemplateButton_CallButton{
+							CallButton: &waE2E.HydratedTemplateButton_HydratedCallButton{
+								DisplayText: proto.String("Ligar"),
+								PhoneNumber: proto.String("+5511999999999"),
+							},
+						},
+					},
+				},
+			},
+		}
+		want := "📞 Ligar: +5511999999999"
+		if got := formatTemplateMessageSummary(tm); got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("deprecated top-level HydratedTemplate field is used as a fallback", func(t *testing.T) {
+		// TemplateMessage carries the hydrated content both as a dedicated
+		// top-level field and as one branch of the Format oneof; some
+		// senders populate only the former.
+		tm := &waE2E.TemplateMessage{
+			Format: &waE2E.TemplateMessage_HydratedFourRowTemplate_{
+				HydratedFourRowTemplate: &waE2E.TemplateMessage_HydratedFourRowTemplate{
+					HydratedContentText: proto.String("Via oneof"),
+				},
+			},
+		}
+		want := "Via oneof"
+		if got := formatTemplateMessageSummary(tm); got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("interactive message template delegates to the interactive formatter", func(t *testing.T) {
+		tm := &waE2E.TemplateMessage{
+			Format: &waE2E.TemplateMessage_InteractiveMessageTemplate{
+				InteractiveMessageTemplate: &waE2E.InteractiveMessage{
+					Body: &waE2E.InteractiveMessage_Body{Text: proto.String("Confirme sua consulta")},
+				},
+			},
+		}
+		want := "Confirme sua consulta"
+		if got := formatTemplateMessageSummary(tm); got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("no hydrated content yields generic sentinel", func(t *testing.T) {
+		tm := &waE2E.TemplateMessage{}
+		want := "Template message"
+		if got := formatTemplateMessageSummary(tm); got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("nil message yields empty string", func(t *testing.T) {
+		if got := formatTemplateMessageSummary(nil); got != "" {
+			t.Fatalf("got %q", got)
+		}
+	})
+}
+
+// TestExtractStructuredMessageContentTemplate mirrors
+// TestExtractStructuredMessageContentInteractive: buildOtherMessageTypes
+// pre-renders TemplateMessage to a plain string via
+// formatTemplateMessageSummary for the same JSON-retry-safety reason.
+func TestExtractStructuredMessageContentTemplate(t *testing.T) {
+	t.Run("pre-rendered string is returned as-is", func(t *testing.T) {
+		got := extractStructuredMessageContent(map[string]any{"template": "Pedido confirmado"})
+		if got != "Pedido confirmado" {
+			t.Fatalf("got %q", got)
+		}
+	})
+
+	t.Run("empty string falls through to empty string", func(t *testing.T) {
+		got := extractStructuredMessageContent(map[string]any{"template": ""})
+		if got != "" {
+			t.Fatalf("got %q", got)
+		}
+	})
+}

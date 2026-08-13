@@ -809,3 +809,38 @@ func TestExtractContextInfoInteractiveMessage(t *testing.T) {
 		}
 	})
 }
+
+func TestExtractContextInfoTemplateMessage(t *testing.T) {
+	t.Run("template message with context info", func(t *testing.T) {
+		msg := &waE2E.Message{
+			TemplateMessage: &waE2E.TemplateMessage{
+				HydratedTemplate: &waE2E.TemplateMessage_HydratedFourRowTemplate{
+					HydratedContentText: proto.String("Pedido confirmado"),
+				},
+				ContextInfo: &waE2E.ContextInfo{
+					StanzaID: proto.String("ABC123"),
+				},
+			},
+		}
+		ci := ExtractContextInfo(msg)
+		if ci == nil {
+			t.Fatal("expected non-nil ContextInfo")
+		}
+		if ci.GetStanzaID() != "ABC123" {
+			t.Fatalf("got StanzaID %q, want %q", ci.GetStanzaID(), "ABC123")
+		}
+	})
+
+	t.Run("template message with no context info yields nil", func(t *testing.T) {
+		msg := &waE2E.Message{
+			TemplateMessage: &waE2E.TemplateMessage{
+				HydratedTemplate: &waE2E.TemplateMessage_HydratedFourRowTemplate{
+					HydratedContentText: proto.String("Pedido confirmado"),
+				},
+			},
+		}
+		if ci := ExtractContextInfo(msg); ci != nil {
+			t.Fatalf("expected nil ContextInfo, got %+v", ci)
+		}
+	})
+}

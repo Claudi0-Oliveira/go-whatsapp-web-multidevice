@@ -528,29 +528,16 @@ func buildChatwootMessageContent(data map[string]any, isGroup bool, fromName str
 		logrus.Infof("Chatwoot: Found %s attachment at %s", field, path)
 	}
 
-	// interactive_media carries zero or more paths collected from an
-	// InteractiveMessage's header and, for carousels, every card's header
-	// (see collectInteractiveMedia in event_message.go) — a plain []string
-	// rather than one of the singular mediaFields above, since a carousel
-	// can have media on more than one card and reusing e.g. "image" would
-	// have each extraction overwrite the last. []any covers the shape after
-	// a JSON round-trip on the Chatwoot forward retry path.
-	switch paths := data["interactive_media"].(type) {
-	case []string:
-		for _, path := range paths {
-			if path != "" {
-				attachments = append(attachments, path)
-				logrus.Infof("Chatwoot: Found interactive media attachment at %s", path)
-			}
-		}
-	case []any:
-		for _, v := range paths {
-			if path, ok := v.(string); ok && path != "" {
-				attachments = append(attachments, path)
-				logrus.Infof("Chatwoot: Found interactive media attachment at %s", path)
-			}
-		}
-	}
+	// interactive_media/template_media each carry zero or more paths collected
+	// from an InteractiveMessage/TemplateMessage header and, for carousels,
+	// every card's header (see collectInteractiveMedia/collectTemplateMedia in
+	// event_message.go) — a plain []string rather than one of the singular
+	// mediaFields above, since a carousel can have media on more than one
+	// card and reusing e.g. "image" would have each extraction overwrite the
+	// last. []any covers the shape after a JSON round-trip on the Chatwoot
+	// forward retry path.
+	attachments = appendMediaPaths(attachments, data["interactive_media"], "interactive")
+	attachments = appendMediaPaths(attachments, data["template_media"], "template")
 
 	// Handle empty content
 	if content == "" && len(attachments) == 0 {
@@ -564,6 +551,29 @@ func buildChatwootMessageContent(data map[string]any, isGroup bool, fromName str
 	}
 
 	return content, attachments
+}
+
+// appendMediaPaths appends every path found in a header-media payload field
+// (populated as either []string on the live path or []any after the retry
+// queue's JSON round-trip) to attachments, logging each one under label.
+func appendMediaPaths(attachments []string, mediaPaths any, label string) []string {
+	switch paths := mediaPaths.(type) {
+	case []string:
+		for _, path := range paths {
+			if path != "" {
+				attachments = append(attachments, path)
+				logrus.Infof("Chatwoot: Found %s media attachment at %s", label, path)
+			}
+		}
+	case []any:
+		for _, v := range paths {
+			if path, ok := v.(string); ok && path != "" {
+				attachments = append(attachments, path)
+				logrus.Infof("Chatwoot: Found %s media attachment at %s", label, path)
+			}
+		}
+	}
+	return attachments
 }
 
 func shouldForwardEventToChatwoot(eventName string) bool {
@@ -717,6 +727,10 @@ func extractStructuredMessageContent(data map[string]any) string {
 		return interactive
 	}
 
+	if template, ok := data["template"].(string); ok && template != "" {
+		return template
+	}
+
 	return ""
 }
 
@@ -795,6 +809,110 @@ func interactiveHeaderMediaCaption(header *waE2E.InteractiveMessage_Header) stri
 	}
 	if doc := header.GetDocumentMessage(); doc != nil {
 		return doc.GetCaption()
+	}
+	return ""
+}
+
+// formatTemplateMessageSummary renders a TemplateMessage (official WhatsApp
+// Business/Cloud API pre-approved notification templates) as plain text,
+// since Chatwoot has no native concept of one. A TemplateMessage is one of
+// three formats: InteractiveMessageTemplate (delegates to the existing
+// InteractiveMessage formatter), HydratedFourRowTemplate (the common case for
+// real inbound business notifications - title/content/footer/buttons with
+// placeholders already filled in), or the legacy non-hydrated FourRowTemplate
+// (placeholder-only HighlyStructuredMessage content, not rendered here since
+// it's effectively unused by modern senders).
+func formatTemplateMessageSummary(tm *waE2E.TemplateMessage) string {
+	if tm == nil {
+		return ""
+	}
+
+	if im := tm.GetInteractiveMessageTemplate(); im != nil {
+		return formatInteractiveMessageSummary(im)
+	}
+
+	hydrated := tm.GetHydratedFourRowTemplate()
+	if hydrated == nil {
+		hydrated = tm.GetHydratedTemplate()
+	}
+	if hydrated == nil {
+		return "Template message"
+	}
+
+	var parts []string
+	if title := hydrated.GetHydratedTitleText(); title != "" {
+		parts = append(parts, title)
+	}
+	// Media titles (image/video/document) are surfaced via
+	// collectTemplateMedia as an attachment; their caption doesn't reach
+	// payload["body"] (ExtractMediaCaption only handles top-level
+	// Get*Message() cases), so surface it here instead of silently dropping
+	// it, same reasoning as interactiveHeaderMediaCaption.
+	if caption := templateHeaderMediaCaption(hydrated); caption != "" {
+		parts = append(parts, caption)
+	}
+	if content := hydrated.GetHydratedContentText(); content != "" {
+		parts = append(parts, content)
+	}
+	if footer := hydrated.GetHydratedFooterText(); footer != "" {
+		parts = append(parts, footer)
+	}
+	for _, button := range hydrated.GetHydratedButtons() {
+		if line := formatHydratedTemplateButton(button); line != "" {
+			parts = append(parts, line)
+		}
+	}
+
+	if len(parts) == 0 {
+		return "Template message"
+	}
+	return strings.Join(parts, "\n")
+}
+
+// templateHeaderMediaCaption mirrors interactiveHeaderMediaCaption, scoped to
+// a TemplateMessage's hydrated header instead of an InteractiveMessage's.
+func templateHeaderMediaCaption(hydrated *waE2E.TemplateMessage_HydratedFourRowTemplate) string {
+	if hydrated == nil {
+		return ""
+	}
+	if img := hydrated.GetImageMessage(); img != nil {
+		return img.GetCaption()
+	}
+	if vid := hydrated.GetVideoMessage(); vid != nil {
+		return vid.GetCaption()
+	}
+	if doc := hydrated.GetDocumentMessage(); doc != nil {
+		return doc.GetCaption()
+	}
+	return ""
+}
+
+func formatHydratedTemplateButton(button *waE2E.HydratedTemplateButton) string {
+	if button == nil {
+		return ""
+	}
+	if quickReply := button.GetQuickReplyButton(); quickReply != nil {
+		if text := quickReply.GetDisplayText(); text != "" {
+			return fmt.Sprintf("[%s]", text)
+		}
+	}
+	if urlButton := button.GetUrlButton(); urlButton != nil {
+		label := urlButton.GetDisplayText()
+		if label == "" {
+			label = "Link"
+		}
+		if url := urlButton.GetURL(); url != "" {
+			return fmt.Sprintf("🔗 %s: %s", label, url)
+		}
+	}
+	if callButton := button.GetCallButton(); callButton != nil {
+		label := callButton.GetDisplayText()
+		if label == "" {
+			label = "Call"
+		}
+		if phone := callButton.GetPhoneNumber(); phone != "" {
+			return fmt.Sprintf("📞 %s: %s", label, phone)
+		}
 	}
 	return ""
 }

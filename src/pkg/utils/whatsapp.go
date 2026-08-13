@@ -701,6 +701,8 @@ func ExtractContextInfo(msg *waE2E.Message) *waE2E.ContextInfo {
 		return msg.GetLiveLocationMessage().GetContextInfo()
 	case msg.GetInteractiveMessage() != nil:
 		return msg.GetInteractiveMessage().GetContextInfo()
+	case msg.GetTemplateMessage() != nil:
+		return msg.GetTemplateMessage().GetContextInfo()
 	}
 	return nil
 }
