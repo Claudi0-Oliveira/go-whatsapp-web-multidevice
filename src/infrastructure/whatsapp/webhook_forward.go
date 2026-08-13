@@ -760,13 +760,12 @@ func extractStructuredMessageContent(data map[string]any) string {
 	return ""
 }
 
-// formatInteractiveMessageSummary renders an InteractiveMessage (business/
+// formatInteractiveMessageSummary renders an InteractiveMessage's (business/
 // Cloud API messages with native buttons: cta_url, cta_call, single/multi
-// select, etc.) as plain text, since Chatwoot has no native concept of a
-// WhatsApp interactive button. Buttons are described in buttonParamsJSON as
-// a per-button-type JSON blob (undocumented, reverse-engineered from
-// traffic), so only the fields relevant to rendering are decoded and
-// anything unrecognized still shows the button's raw name.
+// select, etc.) header/body/footer text. Buttons are NOT included here -
+// they're extracted separately as structured data by extractNativeFlowButtons
+// and sent to Chatwoot as payload["buttons"], letting the dashboard render
+// real button chips instead of text lines.
 func formatInteractiveMessageSummary(im *waE2E.InteractiveMessage) string {
 	var parts []string
 
@@ -797,12 +796,11 @@ func formatInteractiveMessageSummary(im *waE2E.InteractiveMessage) string {
 		}
 	}
 
-	for _, button := range im.GetNativeFlowMessage().GetButtons() {
-		if line := formatNativeFlowButton(button); line != "" {
-			parts = append(parts, line)
-		}
-	}
-
+	// Buttons are intentionally not rendered into this text: they're sent
+	// separately as structured payload["buttons"] data (see
+	// extractNativeFlowButtons) so Chatwoot can render them as real chips
+	// instead of text lines - including both here would show every button
+	// twice.
 	// Carousels put their CTA/quick-reply buttons on each card rather than on
 	// the top-level NativeFlowMessage, so the loop above sees none of them —
 	// summarize each card (itself a full InteractiveMessage) separately.
@@ -883,11 +881,9 @@ func formatTemplateMessageSummary(tm *waE2E.TemplateMessage) string {
 	if footer := hydrated.GetHydratedFooterText(); footer != "" {
 		parts = append(parts, footer)
 	}
-	for _, button := range hydrated.GetHydratedButtons() {
-		if line := formatHydratedTemplateButton(button); line != "" {
-			parts = append(parts, line)
-		}
-	}
+	// Buttons are sent separately as structured data (see
+	// extractHydratedTemplateButtons), same reasoning as
+	// formatInteractiveMessageSummary above.
 
 	if len(parts) == 0 {
 		return "Template message"
@@ -913,36 +909,6 @@ func templateHeaderMediaCaption(hydrated *waE2E.TemplateMessage_HydratedFourRowT
 	return ""
 }
 
-func formatHydratedTemplateButton(button *waE2E.HydratedTemplateButton) string {
-	if button == nil {
-		return ""
-	}
-	if quickReply := button.GetQuickReplyButton(); quickReply != nil {
-		if text := quickReply.GetDisplayText(); text != "" {
-			return fmt.Sprintf("[%s]", text)
-		}
-	}
-	if urlButton := button.GetUrlButton(); urlButton != nil {
-		label := urlButton.GetDisplayText()
-		if label == "" {
-			label = "Link"
-		}
-		if url := urlButton.GetURL(); url != "" {
-			return fmt.Sprintf("🔗 %s: %s", label, url)
-		}
-	}
-	if callButton := button.GetCallButton(); callButton != nil {
-		label := callButton.GetDisplayText()
-		if label == "" {
-			label = "Call"
-		}
-		if phone := callButton.GetPhoneNumber(); phone != "" {
-			return fmt.Sprintf("📞 %s: %s", label, phone)
-		}
-	}
-	return ""
-}
-
 // nativeFlowButtonParams covers the fields used by the button types this
 // forwarder renders specially (cta_url, cta_call, cta_copy). Other button
 // names (e.g. single_select, review_and_pay) fall through to displaying the
@@ -959,71 +925,24 @@ type nativeFlowButtonParams struct {
 	Title string `json:"title"`
 }
 
-func formatNativeFlowButton(button *waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton) string {
-	if button == nil {
-		return ""
-	}
-	name := button.GetName()
-
-	var params nativeFlowButtonParams
-	_ = json.Unmarshal([]byte(button.GetButtonParamsJSON()), &params)
-
-	switch name {
-	case "cta_url":
-		label := params.DisplayText
-		if label == "" {
-			label = "Link"
-		}
-		if params.URL != "" {
-			return fmt.Sprintf("🔗 %s: %s", label, params.URL)
-		}
-	case "cta_call":
-		label := params.DisplayText
-		if label == "" {
-			label = "Call"
-		}
-		if params.PhoneNumber != "" {
-			return fmt.Sprintf("📞 %s: %s", label, params.PhoneNumber)
-		}
-	case "cta_copy":
-		label := params.DisplayText
-		if label == "" {
-			label = "Copy code"
-		}
-		if params.Copy != "" {
-			return fmt.Sprintf("📋 %s: %s", label, params.Copy)
-		}
-	}
-
-	label := params.DisplayText
-	if label == "" {
-		label = params.Title
-	}
-	if label != "" {
-		return fmt.Sprintf("[%s] %s", name, label)
-	}
-	return fmt.Sprintf("[%s]", name)
-}
-
 // interactiveButton is the structured shape sent to Chatwoot via
 // content_attributes.data.buttons, letting the dashboard render real
-// clickable/visual buttons instead of parsing them back out of the
-// "interactive"/"template" text summary. Mirrors the frontend's expected
-// shape in app/javascript/dashboard/components-next/message/bubbles/Base.vue.
-// Value is the URL/phone/copy-code for url/call/copy buttons and empty for
-// reply, since a quick-reply payload isn't actionable from Chatwoot anyway.
+// clickable buttons instead of a text summary. Mirrors the frontend's
+// expected shape in
+// app/javascript/dashboard/components-next/message/bubbles/Base.vue: url/call
+// open a link/dialer directly from Chatwoot; reply sends Label back out as a
+// normal outgoing WhatsApp message (mirroring what tapping the button in
+// WhatsApp itself would send) - Value is unused for that type.
 type interactiveButton struct {
 	Type  string `json:"type"`
 	Label string `json:"label"`
 	Value string `json:"value,omitempty"`
 }
 
-// extractNativeFlowButtons mirrors formatNativeFlowButton's per-type
-// handling, but returns structured entries instead of a text line, and only
-// for the types Chatwoot can meaningfully render (url/call/copy: a real
-// action; quick_reply/single_select: a display-only label). Buttons missing
-// their required field (e.g. cta_url with no url) are skipped rather than
-// emitted with an empty value the frontend would render as a dead link.
+// extractNativeFlowButtons converts an InteractiveMessage's native-flow
+// buttons into the structured shape Chatwoot renders. Buttons missing their
+// required field (e.g. cta_url with no url) are skipped rather than emitted
+// with an empty value the frontend would render as a dead link.
 func extractNativeFlowButtons(im *waE2E.InteractiveMessage) []interactiveButton {
 	var buttons []interactiveButton
 	for _, button := range im.GetNativeFlowMessage().GetButtons() {
@@ -1058,7 +977,10 @@ func extractNativeFlowButtons(im *waE2E.InteractiveMessage) []interactiveButton 
 				label = "Copy code"
 			}
 			buttons = append(buttons, interactiveButton{Type: "copy", Label: label, Value: params.Copy})
-		case "quick_reply", "single_select":
+		default:
+			// quick_reply, single_select, and anything else unrecognized
+			// (e.g. review_and_pay) all render as a display-only reply-style
+			// chip rather than being silently dropped.
 			label := params.DisplayText
 			if label == "" {
 				label = params.Title
@@ -1072,8 +994,8 @@ func extractNativeFlowButtons(im *waE2E.InteractiveMessage) []interactiveButton 
 	return buttons
 }
 
-// extractHydratedTemplateButtons mirrors formatHydratedTemplateButton with
-// the same structured-vs-text distinction as extractNativeFlowButtons.
+// extractHydratedTemplateButtons extracts each hydrated template button as
+// structured data.
 func extractHydratedTemplateButtons(hydrated *waE2E.TemplateMessage_HydratedFourRowTemplate) []interactiveButton {
 	var buttons []interactiveButton
 	for _, button := range hydrated.GetHydratedButtons() {

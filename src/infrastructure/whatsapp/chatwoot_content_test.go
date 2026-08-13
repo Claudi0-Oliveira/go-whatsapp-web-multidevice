@@ -1038,7 +1038,7 @@ func TestGroupNameCache(t *testing.T) {
 // can't be exercised end-to-end without a real Business-API sender — these
 // build the real protobuf type directly instead of relying on a live message.
 func TestFormatInteractiveMessageSummary(t *testing.T) {
-	t.Run("header, body, footer, and cta_url button", func(t *testing.T) {
+	t.Run("header, body, and footer text - buttons are excluded, sent separately as structured data", func(t *testing.T) {
 		im := &waE2E.InteractiveMessage{
 			Header: &waE2E.InteractiveMessage_Header{Title: proto.String("Promo")},
 			Body:   &waE2E.InteractiveMessage_Body{Text: proto.String("Confira nossa oferta")},
@@ -1054,13 +1054,13 @@ func TestFormatInteractiveMessageSummary(t *testing.T) {
 				},
 			},
 		}
-		want := "Promo\nConfira nossa oferta\nEquipe Vendas\n🔗 Visitar site: https://example.com"
+		want := "Promo\nConfira nossa oferta\nEquipe Vendas"
 		if got := formatInteractiveMessageSummary(im); got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
 	})
 
-	t.Run("cta_call button", func(t *testing.T) {
+	t.Run("buttons alone with no header/body/footer text yield the generic sentinel", func(t *testing.T) {
 		im := &waE2E.InteractiveMessage{
 			InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
 				NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
@@ -1073,82 +1073,7 @@ func TestFormatInteractiveMessageSummary(t *testing.T) {
 				},
 			},
 		}
-		want := "📞 Ligar agora: +5511999999999"
-		if got := formatInteractiveMessageSummary(im); got != want {
-			t.Fatalf("got %q, want %q", got, want)
-		}
-	})
-
-	t.Run("cta_url button missing url falls back to raw name", func(t *testing.T) {
-		// A cta_url button whose JSON has no url is unusable as a link, so it
-		// must not silently print a broken "🔗 Label: " line.
-		im := &waE2E.InteractiveMessage{
-			InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
-				NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
-					Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
-						{
-							Name:             proto.String("cta_url"),
-							ButtonParamsJSON: proto.String(`{"display_text":"Visitar site"}`),
-						},
-					},
-				},
-			},
-		}
-		want := "[cta_url] Visitar site"
-		if got := formatInteractiveMessageSummary(im); got != want {
-			t.Fatalf("got %q, want %q", got, want)
-		}
-	})
-
-	t.Run("unrecognized button name falls back to raw name and display text", func(t *testing.T) {
-		im := &waE2E.InteractiveMessage{
-			InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
-				NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
-					Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
-						{
-							Name:             proto.String("single_select"),
-							ButtonParamsJSON: proto.String(`{"display_text":"Choose an option"}`),
-						},
-					},
-				},
-			},
-		}
-		want := "[single_select] Choose an option"
-		if got := formatInteractiveMessageSummary(im); got != want {
-			t.Fatalf("got %q, want %q", got, want)
-		}
-	})
-
-	t.Run("unrecognized button with no display text falls back to bare name", func(t *testing.T) {
-		im := &waE2E.InteractiveMessage{
-			InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
-				NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
-					Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
-						{Name: proto.String("review_and_pay")},
-					},
-				},
-			},
-		}
-		want := "[review_and_pay]"
-		if got := formatInteractiveMessageSummary(im); got != want {
-			t.Fatalf("got %q, want %q", got, want)
-		}
-	})
-
-	t.Run("cta_copy button", func(t *testing.T) {
-		im := &waE2E.InteractiveMessage{
-			InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
-				NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
-					Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
-						{
-							Name:             proto.String("cta_copy"),
-							ButtonParamsJSON: proto.String(`{"display_text":"Copy","copy_code":"SAVE10"}`),
-						},
-					},
-				},
-			},
-		}
-		want := "📋 Copy: SAVE10"
+		want := "Interactive message"
 		if got := formatInteractiveMessageSummary(im); got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
@@ -1182,26 +1107,7 @@ func TestFormatInteractiveMessageSummary(t *testing.T) {
 		}
 	})
 
-	t.Run("single_select button falls back to native-flow title when display_text absent", func(t *testing.T) {
-		im := &waE2E.InteractiveMessage{
-			InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
-				NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
-					Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
-						{
-							Name:             proto.String("single_select"),
-							ButtonParamsJSON: proto.String(`{"title":"Choose a plan","sections":[]}`),
-						},
-					},
-				},
-			},
-		}
-		want := "[single_select] Choose a plan"
-		if got := formatInteractiveMessageSummary(im); got != want {
-			t.Fatalf("got %q, want %q", got, want)
-		}
-	})
-
-	t.Run("carousel summarizes each card, skipping empty ones", func(t *testing.T) {
+	t.Run("carousel summarizes each card's text, skipping empty/button-only ones", func(t *testing.T) {
 		im := &waE2E.InteractiveMessage{
 			Body: &waE2E.InteractiveMessage_Body{Text: proto.String("Check our products")},
 			InteractiveMessage: &waE2E.InteractiveMessage_CarouselMessage_{
@@ -1220,12 +1126,22 @@ func TestFormatInteractiveMessageSummary(t *testing.T) {
 								},
 							},
 						},
-						{}, // empty card: no header/body/footer/buttons, must not add a blank "Card 2: " line
+						// card 2: button only, no text - its summary is the
+						// generic sentinel, which must not add a "Card 2: ..." line
+						{
+							InteractiveMessage: &waE2E.InteractiveMessage_NativeFlowMessage_{
+								NativeFlowMessage: &waE2E.InteractiveMessage_NativeFlowMessage{
+									Buttons: []*waE2E.InteractiveMessage_NativeFlowMessage_NativeFlowButton{
+										{Name: proto.String("cta_url"), ButtonParamsJSON: proto.String(`{"url":"https://example.com/boots"}`)},
+									},
+								},
+							},
+						},
 					},
 				},
 			},
 		}
-		want := "Check our products\nCard 1: Shoes\n🔗 Buy: https://example.com/shoes"
+		want := "Check our products\nCard 1: Shoes"
 		if got := formatInteractiveMessageSummary(im); got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
@@ -1281,7 +1197,7 @@ func TestExtractStructuredMessageContentInteractive(t *testing.T) {
 }
 
 func TestFormatTemplateMessageSummary(t *testing.T) {
-	t.Run("hydrated title, content, footer, and quick reply button", func(t *testing.T) {
+	t.Run("hydrated title, content, and footer - buttons excluded, sent separately as structured data", func(t *testing.T) {
 		tm := &waE2E.TemplateMessage{
 			HydratedTemplate: &waE2E.TemplateMessage_HydratedFourRowTemplate{
 				Title: &waE2E.TemplateMessage_HydratedFourRowTemplate_HydratedTitleText{
@@ -1300,13 +1216,13 @@ func TestFormatTemplateMessageSummary(t *testing.T) {
 				},
 			},
 		}
-		want := "Pedido confirmado\nSeu pedido #123 foi confirmado.\nEquipe Suporte\n[Rastrear pedido]"
+		want := "Pedido confirmado\nSeu pedido #123 foi confirmado.\nEquipe Suporte"
 		if got := formatTemplateMessageSummary(tm); got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
 	})
 
-	t.Run("url button", func(t *testing.T) {
+	t.Run("buttons alone with no title/content/footer text yield the generic sentinel", func(t *testing.T) {
 		tm := &waE2E.TemplateMessage{
 			HydratedTemplate: &waE2E.TemplateMessage_HydratedFourRowTemplate{
 				HydratedButtons: []*waE2E.HydratedTemplateButton{
@@ -1321,28 +1237,7 @@ func TestFormatTemplateMessageSummary(t *testing.T) {
 				},
 			},
 		}
-		want := "🔗 Ver detalhes: https://example.com/order/123"
-		if got := formatTemplateMessageSummary(tm); got != want {
-			t.Fatalf("got %q, want %q", got, want)
-		}
-	})
-
-	t.Run("call button", func(t *testing.T) {
-		tm := &waE2E.TemplateMessage{
-			HydratedTemplate: &waE2E.TemplateMessage_HydratedFourRowTemplate{
-				HydratedButtons: []*waE2E.HydratedTemplateButton{
-					{
-						HydratedButton: &waE2E.HydratedTemplateButton_CallButton{
-							CallButton: &waE2E.HydratedTemplateButton_HydratedCallButton{
-								DisplayText: proto.String("Ligar"),
-								PhoneNumber: proto.String("+5511999999999"),
-							},
-						},
-					},
-				},
-			},
-		}
-		want := "📞 Ligar: +5511999999999"
+		want := "Template message"
 		if got := formatTemplateMessageSummary(tm); got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
