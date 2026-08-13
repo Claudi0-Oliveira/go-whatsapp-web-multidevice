@@ -759,12 +759,16 @@ func extractStructuredMessageContent(data map[string]any) string {
 	return ""
 }
 
-// formatInteractiveMessageSummary renders an InteractiveMessage's (business/
+// formatInteractiveMessageSummary renders an InteractiveMessage (business/
 // Cloud API messages with native buttons: cta_url, cta_call, single/multi
-// select, etc.) header/body/footer text. Buttons are NOT included here -
-// they're extracted separately as structured data by extractNativeFlowButtons
-// and sent to Chatwoot as payload["buttons"], letting the dashboard render
-// real button chips instead of text lines.
+// select, etc.) as plain text, since most Chatwoot installations have no
+// native concept of a WhatsApp interactive button and this is the only way
+// button content reaches them. The same buttons are also sent as structured
+// data (see extractNativeFlowButtons) for installations that do render real
+// button chips — those necessarily show the button twice (once here, once as
+// a chip), a duplication left for the receiving side to resolve however it
+// wants (e.g. hiding the matching text line once its structured counterpart
+// renders) rather than omitting info every other installation depends on.
 func formatInteractiveMessageSummary(im *waE2E.InteractiveMessage) string {
 	var parts []string
 
@@ -795,11 +799,10 @@ func formatInteractiveMessageSummary(im *waE2E.InteractiveMessage) string {
 		}
 	}
 
-	// Buttons are intentionally not rendered into this text: they're sent
-	// separately as structured payload["buttons"] data (see
-	// extractNativeFlowButtons) so Chatwoot can render them as real chips
-	// instead of text lines - including both here would show every button
-	// twice.
+	for _, b := range extractNativeFlowButtons(im) {
+		parts = append(parts, formatButtonLine(b))
+	}
+
 	// Carousels put their CTA/quick-reply buttons on each card rather than on
 	// the top-level NativeFlowMessage, so the loop above sees none of them —
 	// summarize each card (itself a full InteractiveMessage) separately.
@@ -880,9 +883,9 @@ func formatTemplateMessageSummary(tm *waE2E.TemplateMessage) string {
 	if footer := hydrated.GetHydratedFooterText(); footer != "" {
 		parts = append(parts, footer)
 	}
-	// Buttons are sent separately as structured data (see
-	// extractHydratedTemplateButtons), same reasoning as
-	// formatInteractiveMessageSummary above.
+	for _, b := range extractHydratedTemplateButtons(hydrated) {
+		parts = append(parts, formatButtonLine(b))
+	}
 
 	if len(parts) == 0 {
 		return "Template message"
@@ -936,6 +939,23 @@ type interactiveButton struct {
 	Type  string `json:"type"`
 	Label string `json:"label"`
 	Value string `json:"value,omitempty"`
+}
+
+// formatButtonLine renders a single extracted button as the text line
+// formatInteractiveMessageSummary/formatTemplateMessageSummary fold into the
+// message body, so every Chatwoot installation - not just ones with a custom
+// renderer for the structured data - can see what the button offered.
+func formatButtonLine(b interactiveButton) string {
+	switch b.Type {
+	case "url":
+		return fmt.Sprintf("🔗 %s: %s", b.Label, b.Value)
+	case "call":
+		return fmt.Sprintf("📞 %s: %s", b.Label, b.Value)
+	case "copy":
+		return fmt.Sprintf("📋 %s: %s", b.Label, b.Value)
+	default: // reply
+		return fmt.Sprintf("[%s]", b.Label)
+	}
 }
 
 // extractNativeFlowButtons converts an InteractiveMessage's native-flow
